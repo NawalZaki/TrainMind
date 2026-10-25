@@ -1,32 +1,62 @@
-"""Local Ollama embeddings used to index and retrieve curriculum chunks."""
+"""Gemini embeddings used to index and retrieve curriculum chunks."""
 
-import ollama
+from __future__ import annotations
 
-EMBEDDING_MODEL = "nomic-embed-text"
+import os
+from functools import lru_cache
+
+from dotenv import load_dotenv
+from google import genai
+
+load_dotenv()
+
+EMBEDDING_MODEL = "gemini-embedding-001"
 
 
-def _embedding_error(exc: Exception) -> RuntimeError:
-    return RuntimeError(
-        "TrainMind could not create local embeddings. Make sure Ollama is running "
-        "and run `ollama pull nomic-embed-text` in PowerShell."
-    )
+@lru_cache(maxsize=1)
+def _get_client(api_key: str):
+    return genai.Client(api_key=api_key)
+
+
+def _client():
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY is missing. Add it to the project's .env file."
+        )
+
+    return _get_client(api_key)
 
 
 def create_embedding(text: str) -> list[float]:
-    """Convert one text into a local embedding vector."""
+    """Convert one text into a Gemini embedding vector."""
     try:
-        response = ollama.embed(model=EMBEDDING_MODEL, input=text)
-        return response["embeddings"][0]
+        response = _client().models.embed_content(
+            model=EMBEDDING_MODEL,
+            contents=text,
+        )
+        return response.embeddings[0].values
+
     except Exception as exc:
-        raise _embedding_error(exc) from exc
+        raise RuntimeError(
+            f"Gemini embedding failed: {exc}"
+        ) from exc
 
 
 def create_embeddings(texts: list[str]) -> list[list[float]]:
-    """Convert multiple texts into local embedding vectors in one Ollama call."""
+    """Convert multiple texts into Gemini embedding vectors."""
     if not texts:
         return []
+
     try:
-        response = ollama.embed(model=EMBEDDING_MODEL, input=texts)
-        return response["embeddings"]
+        response = _client().models.embed_content(
+            model=EMBEDDING_MODEL,
+            contents=texts,
+        )
+        return [embedding.values for embedding in response.embeddings]
+
     except Exception as exc:
-        raise _embedding_error(exc) from exc
+        raise RuntimeError(
+            f"Gemini embeddings failed: {exc}"
+        ) from exc
