@@ -3,20 +3,27 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import os
 import re
 import tempfile
 from pathlib import Path
+from typing import Callable
 
 import streamlit as st
 from dotenv import load_dotenv
 
-from app.exporters import build_exports
+from app.exporters import EXPORT_VERSION, build_exports
 from app.package_generator import generate_training_package
 from app.ingestion.chunker import chunk_documents
 from app.ingestion.loaders import load_pdf
 from app.rag.embeddings import create_embeddings
-from app.rag.vector_store import add_chunks, list_indexed_sources, source_is_indexed
+from app.rag.vector_store import (
+    add_chunks,
+    delete_indexed_source,
+    list_indexed_source_details,
+    source_is_indexed,
+)
 
 load_dotenv()
 
@@ -66,6 +73,8 @@ div[data-testid="stDownloadButton"] button[kind="primary"] { background:#5269e8;
 .stButton>button[kind="primary"] { background:#5269e8; border:0; box-shadow:0 5px 14px rgba(82,105,232,.2); }
 .stButton>button[kind="primary"]:hover { background:#4058d5; }
 div[data-testid="stDownloadButton"] button[kind="primary"] { background:#5269e8; border:0; box-shadow:0 6px 16px rgba(82,105,232,.2); }
+div[data-testid="stDownloadButton"] button { min-height:2.75rem; border:1px solid #dce2f0; transition:all .18s ease; }
+div[data-testid="stDownloadButton"] button:hover { border-color:#5269e8; color:#4058d5; background:#f1f3ff; transform:translateY(-1px); }
 div[role="radiogroup"] label { border:1px solid #e5e9f3; border-radius:12px; padding:.55rem .85rem; background:#fff; }
 div[role="radiogroup"] label:has(input:checked) { border-color:#5269e8; background:#f0f2ff; }
 div[data-testid="stTabs"] button { font-weight:700; }
@@ -140,7 +149,7 @@ def render_quiz(quiz_text: str) -> None:
                         st.markdown("\n".join(explanation_lines).strip())
             if evidence_lines:
                 with st.expander("📚 Curriculum evidence"):
-                    st.markdown("\n".join(evidence_lines).strip())
+                    render_curriculum_evidence("\n".join(evidence_lines).strip())
 
 
 def render_exercise(exercise_text: str) -> None:
@@ -196,6 +205,14 @@ def render_exercise(exercise_text: str) -> None:
             with st.container(border=True):
                 st.markdown(f"#### {name}")
                 st.markdown(content)
+
+    source_section = next(
+        (content for name, content in sections if name.lower() == "retrieved curriculum sources"),
+        "",
+    )
+    if source_section:
+        with st.expander("📚 Curriculum evidence"):
+            render_curriculum_evidence(source_section)
 
 
 def render_session_plan(plan_text: str) -> None:
@@ -257,8 +274,20 @@ def render_session_plan(plan_text: str) -> None:
                 st.markdown(f"#### {name}")
                 st.markdown(body)
 
+    source_section = next(
+        (body for name, body in sections if name.lower() == "retrieved curriculum sources"),
+        "",
+    )
+    if source_section:
+        with st.expander("📚 Curriculum evidence"):
+            render_curriculum_evidence(source_section)
 
-def index_pdf_bytes(filename: str, content: bytes) -> tuple[int, int, bool]:
+
+def index_pdf_bytes(
+    filename: str,
+    content: bytes,
+    progress_callback: Callable[[str], None] | None = None,
+) -> tuple[int, int, bool]:
     """Index an uploaded PDF only when its content hash is not already stored."""
     file_hash = hashlib.sha256(content).hexdigest()
     if source_is_indexed(Path(filename).name, file_hash):
@@ -266,6 +295,8 @@ def index_pdf_bytes(filename: str, content: bytes) -> tuple[int, int, bool]:
 
     temp_path = None
     try:
+        if progress_callback:
+            progress_callback("Extracting text from the PDF...")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
             temp_file.write(content)
             temp_path = temp_file.name
@@ -279,18 +310,104 @@ def index_pdf_bytes(filename: str, content: bytes) -> tuple[int, int, bool]:
             page["metadata"]["source"] = source_name
             page["metadata"]["file_hash"] = file_hash
 
+        if progress_callback:
+            progress_callback(f"Extracted {len(pages)} pages. Splitting the content...")
         chunks = chunk_documents(pages)
         if not chunks:
             raise ValueError("No text chunks were created from this PDF.")
 
+        if progress_callback:
+            progress_callback(f"Created {len(chunks)} chunks. Creating embeddings and indexing...")
         embeddings = create_embeddings([chunk["text"] for chunk in chunks])
         for chunk in chunks:
             chunk["metadata"]["file_hash"] = file_hash
         add_chunks(chunks, embeddings)
+        if progress_callback:
+            progress_callback(f"Indexed {len(pages)} pages into {len(chunks)} chunks.")
         return len(pages), len(chunks), True
     finally:
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+def render_copy_button(text: str, label: str, key: str) -> None:
+    """Render a browser clipboard button with a manual-copy fallback."""
+    safe_text = html.escape(text, quote=False)
+    copy_id = re.sub(r"[^a-zA-Z0-9_-]", "_", key)
+    st.html(
+        f"""
+        <div id="{copy_id}-root">
+          <textarea id="{copy_id}-source" readonly>{safe_text}</textarea>
+          <button id="{copy_id}-button" type="button">📋 {html.escape(label)}</button>
+          <span id="{copy_id}-status" role="status"></span>
+        </div>
+        <style>
+          #{copy_id}-root {{ font-family: sans-serif; }}
+          #{copy_id}-source {{ display: none; width: 100%; height: 100px; box-sizing: border-box; }}
+          #{copy_id}-button {{ min-height: 42px; width: 100%; padding: 8px 12px; border: 1px solid #d7ddeb; border-radius: 11px; background: white; color: #202b47; font-size: 14px; font-weight: 700; cursor: pointer; }}
+          #{copy_id}-status {{ display: block; color: #188c80; font-size: 12px; padding-top: 3px; }}
+        </style>
+        <script>
+          (() => {{
+            const root = document.getElementById("{copy_id}-root");
+            const button = root.querySelector("button");
+            const source = root.querySelector("textarea");
+            const status = root.querySelector("[role='status']");
+            button.addEventListener("click", async () => {{
+              try {{
+                await navigator.clipboard.writeText(source.value);
+                status.textContent = "Copied to clipboard.";
+              }} catch (error) {{
+                source.style.display = "block";
+                source.select();
+                const copied = document.execCommand("copy");
+                status.textContent = copied
+                  ? "Copied to clipboard."
+                  : "Clipboard unavailable. Select the text above and copy it.";
+              }}
+            }});
+          }})();
+        </script>
+        """,
+        unsafe_allow_javascript=True,
+    )
+
+
+def render_curriculum_evidence(evidence_text: str) -> None:
+    """Render source and page citations as separate, readable reference cards."""
+    page_matches = list(
+        re.finditer(
+            r"(?:(?P<source>[^;]*?\.pdf)\s*,\s*)?Page\s+(?P<page>\d+)"
+            r"(?:\s*,\s*Question\s+(?P<question>\d+))?",
+            evidence_text,
+            re.IGNORECASE,
+        )
+    )
+    if not page_matches:
+        st.markdown(evidence_text)
+        return
+
+    current_source = ""
+    prefix = evidence_text[:page_matches[0].start()].strip(" ;,.\n-*")
+    if prefix:
+        st.markdown(prefix)
+
+    for index, match in enumerate(page_matches):
+        if match.group("source"):
+            current_source = match.group("source").strip()
+        next_start = page_matches[index + 1].start() if index + 1 < len(page_matches) else len(evidence_text)
+        excerpt = evidence_text[match.end():next_start].strip(" ;,.\n")
+
+        with st.container(border=True):
+            source_column, page_column = st.columns([4, 1])
+            with source_column:
+                st.write(f"📄 {current_source or 'Curriculum source'}")
+            with page_column:
+                st.caption(f"Page {match.group('page')}")
+            if match.group("question"):
+                st.caption(f"Related question: {match.group('question')}")
+            if excerpt:
+                st.markdown(f"> {excerpt}")
 
 
 st.markdown("""
@@ -311,34 +428,65 @@ if not os.getenv("GEMINI_API_KEY", "").strip():
 
 with st.container(border=True):
     st.markdown('<div class="section-title"><span class="step">1</span>Your curriculum library</div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-note">Upload PDFs and they will be extracted and indexed automatically.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-note">Upload PDFs to extract and index them. Uploading a newer PDF with the same name replaces the indexed version after processing succeeds.</div>', unsafe_allow_html=True)
+    upload_key_version = st.session_state.get("trainmind_upload_key_version", 0)
     uploads = st.file_uploader(
         "Choose one or more curriculum PDFs. New or changed files are indexed automatically.",
         type=["pdf"],
         accept_multiple_files=True,
         help="Previously indexed files remain in the local ChromaDB index.",
+        key=f"curriculum_upload_{upload_key_version}",
     )
 
     if uploads:
         for uploaded in uploads:
+            status = None
             try:
                 file_bytes = uploaded.getvalue()
                 file_hash = hashlib.sha256(file_bytes).hexdigest()
                 if source_is_indexed(Path(uploaded.name).name, file_hash):
-                    st.caption(f"✓ {uploaded.name}: already indexed; skipped re-indexing.")
+                    st.caption(f"✓ {uploaded.name} · Indexed · unchanged")
                     continue
-                with st.spinner(f"Preparing {uploaded.name}: extracting text and indexing once..."):
-                    pages_count, chunks_count, indexed = index_pdf_bytes(uploaded.name, file_bytes)
+
+                with st.status(f"Processing {uploaded.name}...", expanded=True) as status:
+                    def report_index_progress(message: str) -> None:
+                        status.update(label=f"{uploaded.name}: {message}", state="running")
+
+                    pages_count, chunks_count, indexed = index_pdf_bytes(
+                        uploaded.name,
+                        file_bytes,
+                        progress_callback=report_index_progress,
+                    )
+                    status.update(
+                        label=f"{uploaded.name}: {pages_count} pages · {chunks_count} chunks · Indexed",
+                        state="complete",
+                        expanded=False,
+                    )
                 if indexed:
-                    st.success(f"{uploaded.name}: indexed {pages_count} pages into {chunks_count} chunks.")
+                    st.success(f"{uploaded.name} was indexed successfully.")
             except Exception as exc:
+                if status:
+                    status.update(label=f"{uploaded.name}: indexing failed", state="error")
                 st.error(f"Could not index {uploaded.name}: {exc}")
 
-    sources = list_indexed_sources()
+    sources = list_indexed_source_details()
     if sources:
-        with st.expander(f"Indexed curriculum ({len(sources)} source file(s))", expanded=False):
-            for source in sources:
-                st.write(f"• {source}")
+        st.markdown(f"**Indexed curriculum · {len(sources)} file(s)**")
+        for source in sources:
+            name_column, status_column, action_column = st.columns([5, 3, 1])
+            with name_column:
+                st.write(f"📄 {source['source']}")
+            with status_column:
+                st.caption(f"✓ Indexed · {source['pages']} pages · {source['chunks']} chunks")
+            with action_column:
+                if st.button(
+                    "Remove",
+                    key=f"remove_curriculum_{hashlib.sha256(source['source'].encode()).hexdigest()[:12]}",
+                    help=f"Remove {source['source']} from the curriculum index",
+                ):
+                    delete_indexed_source(source["source"])
+                    st.session_state["trainmind_upload_key_version"] = upload_key_version + 1
+                    st.rerun()
     else:
         st.info("Upload a text-based PDF to begin. Indexed files are kept in the local ChromaDB database.")
 
@@ -362,20 +510,41 @@ with st.container(border=True):
         use_container_width=True,
         disabled=not bool(sources) or not topic.strip(),
     ):
+        st.session_state.pop("trainmind_package", None)
+        st.session_state.pop("trainmind_exports", None)
+        progress = st.progress(5, text="Starting package generation...")
+        status = None
         try:
-            with st.spinner("Gemini is preparing all nine artifacts from your curriculum evidence..."):
+            with st.status(
+                "Generating nine curriculum-grounded artifacts...",
+                expanded=True,
+            ) as status:
+                status.write("Creating a Quiz, Exercise, and Session Plan for Beginner, Intermediate, and Advanced levels.")
+                progress.progress(15, text="Generating the three learning levels...")
                 package = generate_training_package(topic.strip())
+                progress.progress(75, text="Building the complete package...")
+                status.update(label="All nine artifacts are ready. Preparing downloads...", state="running")
                 exports = build_exports(package)
+                progress.progress(100, text="Your package is ready.")
+                status.update(label="Training package generated successfully.", state="complete", expanded=False)
             st.session_state["trainmind_package"] = package
             st.session_state["trainmind_exports"] = exports
             st.success("Training package generated and all three export formats are ready.")
         except Exception as exc:
-            st.error(str(exc))
-            st.caption("Check that Gemini API access is available and the topic is covered by the indexed curriculum.")
+            if status:
+                status.update(label="Package generation failed.", state="error")
+            progress.empty()
+            st.error(f"Package generation failed: {exc}")
+            st.caption("Check your Gemini API key and connection, then try a topic covered by the indexed curriculum.")
 
 package = st.session_state.get("trainmind_package")
 exports = st.session_state.get("trainmind_exports")
-if package:
+if package and exports:
+    if exports.get("version") != EXPORT_VERSION:
+        with st.spinner("Updating your downloads to the latest professional design..."):
+            exports = build_exports(package)
+            st.session_state["trainmind_exports"] = exports
+
     st.divider()
     st.markdown(f'<div class="section-title">📦 Your training package · {package["topic"]}</div>', unsafe_allow_html=True)
     st.markdown('<div class="section-note">Generated from retrieved curriculum passages, with session timing checked to exactly 90 minutes.</div>', unsafe_allow_html=True)
@@ -397,20 +566,45 @@ if package:
                             f'<div class="artifact-label">{icon} {level.title()} · {artifact_name}</div>',
                             unsafe_allow_html=True,
                         )
+                        artifact_text = package["levels"][level][artifact]
                         if artifact == "quiz":
-                            render_quiz(package["levels"][level][artifact])
+                            render_quiz(artifact_text)
                         elif artifact == "exercise":
-                            render_exercise(package["levels"][level][artifact])
+                            render_exercise(artifact_text)
                         elif artifact == "session_plan":
-                            render_session_plan(package["levels"][level][artifact])
+                            render_session_plan(artifact_text)
                         else:
-                            st.markdown(package["levels"][level][artifact])
+                            st.markdown(artifact_text)
                         if artifact == "session_plan":
                             validation = package["levels"][level]["timing_validation"]
                             if validation["valid"] and validation["total_minutes"] == 90:
                                 st.success("Timing validated: 0–90 minutes, no gaps or overlaps.")
                             else:
                                 st.error("Session timing validation failed.")
+                        copy_column, pdf_column, ppt_column, word_column = st.columns([1.3, 1, 1, 1])
+                        with copy_column:
+                            render_copy_button(
+                                artifact_text,
+                                "Copy",
+                                f"{level}_{artifact}",
+                            )
+                        artifact_exports = exports["artifacts"][level][artifact]
+                        format_buttons = (
+                            (pdf_column, "📄 PDF", "pdf", "application/pdf", "pdf"),
+                            (ppt_column, "📊 PowerPoint", "pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "pptx"),
+                            (word_column, "📝 Word", "docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"),
+                        )
+                        for column, label, export_key, mime_type, extension in format_buttons:
+                            with column:
+                                st.download_button(
+                                    label,
+                                    data=artifact_exports[export_key],
+                                    file_name=f"trainmind_{level}_{artifact}.{extension}",
+                                    mime=mime_type,
+                                    key=f"download_{level}_{artifact}_{extension}",
+                                    on_click="ignore",
+                                    use_container_width=True,
+                                )
 
     st.markdown("### 📚 Curriculum sources")
     source_pages: dict[str, set[int]] = {}
@@ -449,6 +643,7 @@ if package:
         data=exports[export_key],
         file_name=filename,
         mime=mime_type,
+        on_click="ignore",
         use_container_width=True,
         type="primary",
     )

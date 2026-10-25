@@ -61,6 +61,8 @@ def _fake_model_package():
 
 
 def test_generate_training_package_creates_all_nine_artifacts(monkeypatch):
+    prompts = []
+
     monkeypatch.setattr(
         package_module,
         "search_curriculum",
@@ -72,16 +74,29 @@ def test_generate_training_package_creates_all_nine_artifacts(monkeypatch):
             }
         ],
     )
-    monkeypatch.setattr(package_module, "generate_json", lambda prompt: json.dumps(_fake_model_package()))
+
+    def fake_generate_json(prompt):
+        prompts.append(prompt)
+        level = next(level for level in package_module.LEVELS if f"LEARNER LEVEL: {level}" in prompt)
+        return json.dumps({level: _fake_model_package()[level]})
+
+    monkeypatch.setattr(package_module, "generate_json", fake_generate_json)
 
     result = package_module.generate_training_package("RAG")
 
+    assert len(prompts) == 3
+    assert all("exactly one top-level key" in prompt for prompt in prompts)
     assert set(result["levels"]) == {"beginner", "intermediate", "advanced"}
     for level in result["levels"].values():
         assert set(("quiz", "exercise", "session_plan")).issubset(level)
         assert level["timing_validation"]["valid"] is True
         assert level["timing_validation"]["total_minutes"] == 90
         assert "sample.pdf, page 1" in level["quiz"]
+
+
+def test_parse_json_explains_incomplete_response_may_reach_output_limit():
+    with pytest.raises(ValueError, match="GEMINI_MAX_OUTPUT_TOKENS"):
+        package_module._parse_json('{"beginner": {"quiz": [')
 
 
 def test_generate_training_package_fails_when_no_curriculum_matches(monkeypatch):

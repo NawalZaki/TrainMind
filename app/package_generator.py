@@ -46,23 +46,24 @@ def _get_context(topic: str, top_k: int = 10) -> tuple[str, list[dict]]:
     return "\n\n--- CURRICULUM EXCERPT ---\n\n".join(context_parts)[:18000], unique_results
 
 
-def _prompt(topic: str, context: str) -> str:
+def _prompt(topic: str, context: str, level: str) -> str:
     return f'''You are TrainMind, an ITI Trainer Copilot. Create a complete training package for the topic below.
 
 TOPIC: {topic}
+LEARNER LEVEL: {level}
 
 NON-NEGOTIABLE SOURCE RULES
 - Use ONLY the curriculum evidence supplied below. No outside knowledge.
 - Do not invent facts, tools, prerequisites, commands, code, procedures, or technologies.
 - If evidence is insufficient for a specific task, state this explicitly in that artifact and provide a source-supported alternative.
-- You must produce artifacts for all three levels. Higher difficulty means deeper reasoning about the SAME supported concepts, not adding new content.
+- Match the cognitive demand to the requested level while using the SAME supported concepts, not adding new content.
 - Beginner: identify, define, explain, or sequence concepts explicitly in the source.
 - Intermediate: connect concepts, apply the described workflow, or reason about source-described failure modes when supported.
 - Advanced: evaluate trade-offs, diagnose source-described failures, or justify decisions only when supported. If the evidence does not support an advanced task, explain the limitation rather than inventing one.
 - Do not claim a level is supported just because it is common in training.
 - Include source/page references where possible.
 
-RETURN ONE VALID JSON OBJECT ONLY, with no Markdown fences. It must have exactly these top-level keys: "beginner", "intermediate", and "advanced". Each level must contain these three keys: "quiz", "exercise", and "session_plan".
+RETURN ONE VALID JSON OBJECT ONLY, with no Markdown fences. It must have exactly one top-level key: "{level}". That level must contain these three keys: "quiz", "exercise", and "session_plan".
 
 Each quiz is an array of question objects. Every question object must contain:
 - question: string
@@ -83,12 +84,11 @@ Each session_plan is an object containing:
 The application attaches the actual retrieved source filenames and page numbers after generation. Do not fabricate source metadata.
 
 Detailed output requirements:
-- Provide 5 quiz questions per level, each with exactly 4 options and a correct_answer of A, B, C, or D. Distractors must not introduce unsupported factual claims as if true.
+- Provide exactly 5 quiz questions, each with exactly 4 options and a correct_answer of A, B, C, or D. Distractors must not introduce unsupported factual claims as if true.
 - Exercise fields must all be present. If no prerequisites are explicitly stated in the source, use an empty list.
-- Each session plan must have 2-4 measurable learning objectives, and exactly six segments with the activity names in this exact order: Introduction, Concept Explanation, Practical Activity, Exercise, Quick Quiz, Assessment.
+- The session plan must have 2-4 measurable learning objectives, and exactly six segments with the activity names in this exact order: Introduction, Concept Explanation, Practical Activity, Exercise, Quick Quiz, Assessment.
 - Session plans are exactly 90 minutes. The application will assign these exact times, so do not add alternative timings: 0-10, 10-25, 25-50, 50-65, 65-75, 75-90.
 - The segments should have enough detail to guide the trainer, but must remain grounded in the source.
-- All 3 levels should be meaningfully different in cognitive demand without introducing unsupported concepts.
 - Return valid JSON, with no trailing comments.
 
 CURRICULUM EVIDENCE:
@@ -204,12 +204,20 @@ def _parse_json(raw: str) -> dict:
         result = json.loads(cleaned)
     except json.JSONDecodeError:
         start, end = cleaned.find("{"), cleaned.rfind("}")
-        if start < 0 or end <= start:
+        if start < 0:
             raise ValueError("Gemini did not return a valid JSON package. Please try again.")
+        if end <= start:
+            raise ValueError(
+                "Gemini returned incomplete JSON. The response may have reached its output limit; "
+                "try again, or increase GEMINI_MAX_OUTPUT_TOKENS in your .env file."
+            )
         try:
             result = json.loads(cleaned[start:end + 1])
         except json.JSONDecodeError as exc:
-            raise ValueError("Gemini returned incomplete JSON. Please try again.") from exc
+            raise ValueError(
+                "Gemini returned incomplete JSON. The response may have reached its output limit; "
+                "try again, or increase GEMINI_MAX_OUTPUT_TOKENS in your .env file."
+            ) from exc
     if not isinstance(result, dict):
         raise ValueError("Gemini returned an invalid package structure.")
     return result
@@ -223,7 +231,7 @@ def validate_session_timing(plan_text: str) -> dict:
 
 
 def generate_training_package(topic: str) -> dict:
-    """Retrieve curriculum evidence once and generate all 9 artifacts in one model call."""
+    """Retrieve curriculum evidence once and generate one level per model call."""
     topic = topic.strip()
     if not topic:
         raise ValueError("Enter a topic before generating the package.")
@@ -235,11 +243,11 @@ def generate_training_package(topic: str) -> dict:
             "Upload/index the relevant material or try a topic that appears in it."
         )
 
-    raw = generate_json(_prompt(topic, context))
-    data = _parse_json(raw)
     rendered_levels = {}
 
     for level in LEVELS:
+        raw = generate_json(_prompt(topic, context, level))
+        data = _parse_json(raw)
         level_data = data.get(level)
         if not isinstance(level_data, dict):
             raise ValueError(f"Gemini's package is missing the {level} level. Please try again.")

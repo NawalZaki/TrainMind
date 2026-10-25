@@ -64,3 +64,37 @@ def list_indexed_sources() -> list[str]:
         if metadata and metadata.get("source")
     }
     return sorted(sources, key=str.casefold)
+
+
+def list_indexed_source_details() -> list[dict[str, str | int]]:
+    """List indexed source filenames with their page and chunk counts."""
+    records = collection.get(include=["metadatas"])
+    source_pages: dict[str, set[int]] = defaultdict(set)
+    source_chunks: dict[str, int] = defaultdict(int)
+    for metadata in records.get("metadatas") or []:
+        if not metadata:
+            continue
+        source = metadata.get("source")
+        if not source:
+            continue
+
+        page = metadata.get("page")
+        if page is not None:
+            source_pages[source].add(int(page))
+        source_chunks[source] += 1
+
+    return [
+        {
+            "source": source,
+            "pages": len(source_pages[source]),
+            "chunks": source_chunks[source],
+        }
+        for source in sorted(source_chunks, key=str.casefold)
+    ]
+
+
+def delete_indexed_source(source: str) -> None:
+    """Remove every indexed chunk belonging to a curriculum source."""
+    if not source:
+        raise ValueError("A source filename is required.")
+    collection.delete(where={"source": source})
