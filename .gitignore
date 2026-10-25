@@ -1,0 +1,12 @@
+.venv/
+.venv-1/
+
+.env
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+.streamlit/secrets.toml
+
+data/chroma/
