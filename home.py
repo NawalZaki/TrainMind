@@ -351,20 +351,27 @@ with st.container(border=True):
         help="TrainMind will generate a quiz, exercise, and 90-minute session plan for each of the three levels.",
     )
 
-    if st.button("✨ Generate Package", type="primary", use_container_width=True, disabled=not bool(sources)):
-        if not topic.strip():
-            st.warning("Enter a training topic first.")
-        else:
-            try:
-                with st.spinner("Gemini is preparing all nine artifacts from your curriculum evidence..."):
-                    package = generate_training_package(topic)
-                    exports = build_exports(package)
-                st.session_state["trainmind_package"] = package
-                st.session_state["trainmind_exports"] = exports
-                st.success("Training package generated and all three export formats are ready.")
-            except Exception as exc:
-                st.error(str(exc))
-                st.caption("Check that Gemini API access is available and the topic is covered by the indexed curriculum.")
+    if not sources:
+        st.caption("Upload and index a curriculum PDF to enable package generation.")
+    elif not topic.strip():
+        st.caption("Enter a training topic to enable package generation.")
+
+    if st.button(
+        "✨ Generate Package",
+        type="primary",
+        use_container_width=True,
+        disabled=not bool(sources) or not topic.strip(),
+    ):
+        try:
+            with st.spinner("Gemini is preparing all nine artifacts from your curriculum evidence..."):
+                package = generate_training_package(topic.strip())
+                exports = build_exports(package)
+            st.session_state["trainmind_package"] = package
+            st.session_state["trainmind_exports"] = exports
+            st.success("Training package generated and all three export formats are ready.")
+        except Exception as exc:
+            st.error(str(exc))
+            st.caption("Check that Gemini API access is available and the topic is covered by the indexed curriculum.")
 
 package = st.session_state.get("trainmind_package")
 exports = st.session_state.get("trainmind_exports")
