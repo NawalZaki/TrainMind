@@ -91,7 +91,7 @@ div[data-testid="stAlert"] { border-radius:12px; }
 """, unsafe_allow_html=True)
 
 
-def render_quiz(quiz_text: str) -> None:
+def render_quiz(quiz_text: str, citations: str = "") -> None:
     """Render generated multiple-choice questions as readable cards."""
     question_matches = list(re.finditer(r"(?m)^###\s*Question\s+(\d+)\s*$", quiz_text))
     if not question_matches:
@@ -131,6 +131,8 @@ def render_quiz(quiz_text: str) -> None:
 
         with st.container(border=True):
             st.markdown(f"#### Question {match.group(1)}")
+            if citations:
+                st.caption(f"Retrieved curriculum: {citations}")
             prompt = "\n".join(question_lines).strip()
             if prompt:
                 st.markdown(prompt)
@@ -317,10 +319,12 @@ def index_pdf_bytes(
             raise ValueError("No text chunks were created from this PDF.")
 
         if progress_callback:
-            progress_callback(f"Created {len(chunks)} chunks. Creating embeddings and indexing...")
+            progress_callback(f"Created {len(chunks)} chunks. Creating embeddings...")
         embeddings = create_embeddings([chunk["text"] for chunk in chunks])
         for chunk in chunks:
             chunk["metadata"]["file_hash"] = file_hash
+        if progress_callback:
+            progress_callback("Embeddings ready. Saving vectors to the curriculum index...")
         add_chunks(chunks, embeddings)
         if progress_callback:
             progress_callback(f"Indexed {len(pages)} pages into {len(chunks)} chunks.")
@@ -374,7 +378,20 @@ def render_copy_button(text: str, label: str, key: str) -> None:
 
 
 def render_curriculum_evidence(evidence_text: str) -> None:
-    """Render source and page citations as separate, readable reference cards."""
+    """Normalize common citation formats and render source evidence as cards."""
+    # Models may return evidence as ``SOURCE: file.pdf | PAGE: 3: excerpt``
+    # while other levels use ``file.pdf, Page 3: excerpt``. Normalize both to
+    # the same structure before rendering so every level gets identical cards.
+    evidence_text = re.sub(
+        r"SOURCE\s*:\s*([^|\n]+?)\s*\|\s*PAGE\s*:\s*(\d+)",
+        lambda match: f"{match.group(1).strip()}, Page {match.group(2)}:",
+        evidence_text,
+        flags=re.IGNORECASE,
+    )
+    evidence_text = re.sub(
+        r"\bPAGE\s*:\s*(\d+)", r"Page \1:", evidence_text, flags=re.IGNORECASE
+    )
+
     page_matches = list(
         re.finditer(
             r"(?:(?P<source>[^;]*?\.pdf)\s*,\s*)?Page\s+(?P<page>\d+)"
@@ -484,8 +501,21 @@ with st.container(border=True):
                     key=f"remove_curriculum_{hashlib.sha256(source['source'].encode()).hexdigest()[:12]}",
                     help=f"Remove {source['source']} from the curriculum index",
                 ):
-                    delete_indexed_source(source["source"])
+                    st.session_state["trainmind_pending_remove"] = source["source"]
+                    st.rerun()
+        pending_remove = st.session_state.get("trainmind_pending_remove")
+        if pending_remove:
+            st.warning(f"Remove **{pending_remove}** from the indexed curriculum?")
+            confirm_column, cancel_column, _ = st.columns([1, 1, 5])
+            with confirm_column:
+                if st.button("Yes, remove", type="primary", key="confirm_remove_curriculum"):
+                    delete_indexed_source(pending_remove)
+                    st.session_state.pop("trainmind_pending_remove", None)
                     st.session_state["trainmind_upload_key_version"] = upload_key_version + 1
+                    st.rerun()
+            with cancel_column:
+                if st.button("Cancel", key="cancel_remove_curriculum"):
+                    st.session_state.pop("trainmind_pending_remove", None)
                     st.rerun()
     else:
         st.info("Upload a text-based PDF to begin. Indexed files are kept in the local ChromaDB database.")
@@ -516,13 +546,22 @@ with st.container(border=True):
         status = None
         try:
             with st.status(
-                "Generating nine curriculum-grounded artifacts...",
+                "Preparing your curriculum-grounded package...",
                 expanded=True,
             ) as status:
-                status.write("Creating a Quiz, Exercise, and Session Plan for Beginner, Intermediate, and Advanced levels.")
-                progress.progress(15, text="Generating the three learning levels...")
-                package = generate_training_package(topic.strip())
-                progress.progress(75, text="Building the complete package...")
+                status.write("Each level is generated and validated separately: Quiz, Exercise, and Session Plan.")
+                def report_generation_progress(message: str) -> None:
+                    status.write(message)
+                    match = re.search(r"(Beginner|Intermediate|Advanced) level (complete|failed)", message, re.I)
+                    if match:
+                        level_index = {"beginner": 0, "intermediate": 1, "advanced": 2}[match.group(1).lower()]
+                        percent = 20 + (level_index + 1) * 20 if match.group(2).lower() == "complete" else 20 + level_index * 20
+                        progress.progress(percent, text=message)
+                    else:
+                        progress.progress(15, text=message)
+
+                package = generate_training_package(topic.strip(), progress_callback=report_generation_progress)
+                progress.progress(75, text="Building PDF, Word, and PowerPoint downloads...")
                 status.update(label="All nine artifacts are ready. Preparing downloads...", state="running")
                 exports = build_exports(package)
                 progress.progress(100, text="Your package is ready.")
@@ -535,6 +574,7 @@ with st.container(border=True):
                 status.update(label="Package generation failed.", state="error")
             progress.empty()
             st.error(f"Package generation failed: {exc}")
+            st.info("No package was saved because generation stopped before all three levels passed validation. Review the level and error above, then retry.")
             st.caption("Check your Gemini API key and connection, then try a topic covered by the indexed curriculum.")
 
 package = st.session_state.get("trainmind_package")
@@ -566,9 +606,15 @@ if package and exports:
                             f'<div class="artifact-label">{icon} {level.title()} · {artifact_name}</div>',
                             unsafe_allow_html=True,
                         )
+                        source_labels = package.get("sources", [])
+                        source_summary = "; ".join(
+                            f"{item['source']} · p. {item['page']}" for item in source_labels
+                        )
+                        if source_summary and artifact != "quiz":
+                            st.caption(f"Curriculum evidence for this artifact: {source_summary}")
                         artifact_text = package["levels"][level][artifact]
                         if artifact == "quiz":
-                            render_quiz(artifact_text)
+                            render_quiz(artifact_text, source_summary)
                         elif artifact == "exercise":
                             render_exercise(artifact_text)
                         elif artifact == "session_plan":

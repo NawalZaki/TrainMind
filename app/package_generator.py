@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Callable
 
 from app.rag.generator import generate_json
 from app.rag.retriever import search_curriculum
@@ -20,7 +20,7 @@ SCHEDULE = [
 ]
 
 
-def _get_context(topic: str, top_k: int = 10) -> tuple[str, list[dict]]:
+def _get_context(topic: str, top_k: int = 7) -> tuple[str, list[dict]]:
     results = search_curriculum(topic, top_k=top_k, distance_threshold=0.9)
     unique_results = []
     seen = set()
@@ -43,7 +43,7 @@ def _get_context(topic: str, top_k: int = 10) -> tuple[str, list[dict]]:
             f"PAGE: {metadata.get('page', 'Unknown')}\n{item['text']}"
         )
     # Keep one request reasonably small, especially for Free Tier usage.
-    return "\n\n--- CURRICULUM EXCERPT ---\n\n".join(context_parts)[:18000], unique_results
+    return "\n\n--- CURRICULUM EXCERPT ---\n\n".join(context_parts)[:12000], unique_results
 
 
 def _prompt(topic: str, context: str, level: str) -> str:
@@ -230,7 +230,10 @@ def validate_session_timing(plan_text: str) -> dict:
     return {"valid": found == expected, "expected_intervals": expected, "found_intervals": found, "total_minutes": found[-1][1] if found else 0}
 
 
-def generate_training_package(topic: str) -> dict:
+def generate_training_package(
+    topic: str,
+    progress_callback: Callable[[str], None] | None = None,
+) -> dict:
     """Retrieve curriculum evidence once and generate one level per model call."""
     topic = topic.strip()
     if not topic:
@@ -246,23 +249,33 @@ def generate_training_package(topic: str) -> dict:
     rendered_levels = {}
 
     for level in LEVELS:
-        raw = generate_json(_prompt(topic, context, level))
-        data = _parse_json(raw)
-        level_data = data.get(level)
-        if not isinstance(level_data, dict):
-            raise ValueError(f"Gemini's package is missing the {level} level. Please try again.")
-        quiz = _render_quiz(level_data.get("quiz"))
-        exercise = _render_exercise(level_data.get("exercise"))
-        session_plan = _render_session_plan(level_data.get("session_plan"))
-        timing = validate_session_timing(session_plan)
-        if not timing["valid"] or timing["total_minutes"] != 90:
-            raise ValueError(f"The {level} session plan did not pass the 90-minute timing check.")
-        rendered_levels[level] = {
-            "quiz": quiz,
-            "exercise": exercise,
-            "session_plan": session_plan,
-            "timing_validation": timing,
-        }
+        if progress_callback:
+            progress_callback(f"Generating {level.title()} Quiz, Exercise, and Session Plan...")
+        try:
+            raw = generate_json(_prompt(topic, context, level))
+            data = _parse_json(raw)
+            level_data = data.get(level)
+            if not isinstance(level_data, dict):
+                raise ValueError(f"Gemini's response is missing the {level} level.")
+            quiz = _render_quiz(level_data.get("quiz"))
+            exercise = _render_exercise(level_data.get("exercise"))
+            session_plan = _render_session_plan(level_data.get("session_plan"))
+            timing = validate_session_timing(session_plan)
+            if not timing["valid"] or timing["total_minutes"] != 90:
+                raise ValueError("the session plan did not pass the 90-minute timing check.")
+            rendered_levels[level] = {
+                "quiz": quiz,
+                "exercise": exercise,
+                "session_plan": session_plan,
+                "timing_validation": timing,
+            }
+        except Exception as exc:
+            failure = f"{level.title()} level failed: {exc}"
+            if progress_callback:
+                progress_callback(failure)
+            raise RuntimeError(failure) from exc
+        if progress_callback:
+            progress_callback(f"{level.title()} level complete (3 artifacts).")
 
     source_records = []
     seen_sources = set()
@@ -276,7 +289,7 @@ def generate_training_package(topic: str) -> dict:
 
     # Source labels are taken from Chroma metadata, never trusted from model-generated text.
     source_lines = "\n".join(f"- {item['source']}, page {item['page']}" for item in source_records)
-    for level in LEVELS:
+    for level in rendered_levels:
         for artifact in ("quiz", "exercise", "session_plan"):
             rendered_levels[level][artifact] += "\n\n## Retrieved Curriculum Sources\n" + (source_lines or "- No source metadata available.")
 
