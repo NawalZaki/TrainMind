@@ -6,31 +6,64 @@ import io
 import re
 from xml.sax.saxutils import escape
 
-from docx import Document
-from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-from docx.shared import Inches, Pt
-from docx.shared import RGBColor as DocxRGBColor
-from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_SHAPE
-from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE
-from pptx import Presentation
-from pptx.util import Inches as PptInches, Pt as PptPt
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import mm
-from reportlab.platypus import (
-    Flowable,
-    PageBreak,
-    Paragraph,
-    SimpleDocTemplate,
-    Spacer,
-    Table,
-    TableStyle,
-)
+try:
+    from docx import Document
+    from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.shared import Inches, Pt
+    from docx.shared import RGBColor as DocxRGBColor
+except ModuleNotFoundError as exc:
+    Document = None
+    WD_CELL_VERTICAL_ALIGNMENT = None
+    WD_ALIGN_PARAGRAPH = None
+    OxmlElement = None
+    qn = None
+    Inches = Pt = DocxRGBColor = None
+    _EXPORT_IMPORT_ERROR = exc
+else:
+    _EXPORT_IMPORT_ERROR = None
+
+try:
+    from pptx.dml.color import RGBColor
+    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE
+    from pptx import Presentation
+    from pptx.util import Inches as PptInches, Pt as PptPt
+except ModuleNotFoundError as exc:
+    RGBColor = None
+    MSO_SHAPE = None
+    MSO_ANCHOR = None
+    MSO_AUTO_SIZE = None
+    Presentation = None
+    PptInches = PptPt = None
+    if _EXPORT_IMPORT_ERROR is None:
+        _EXPORT_IMPORT_ERROR = exc
+
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        Flowable,
+        PageBreak,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+except ModuleNotFoundError as exc:
+    colors = None
+    A4 = None
+    getSampleStyleSheet = None
+    ParagraphStyle = None
+    mm = None
+    Flowable = PageBreak = Paragraph = SimpleDocTemplate = Spacer = Table = TableStyle = None
+    if _EXPORT_IMPORT_ERROR is None:
+        _EXPORT_IMPORT_ERROR = exc
 
 LEVEL_TITLES = {"beginner": "Beginner", "intermediate": "Intermediate", "advanced": "Advanced"}
 ARTIFACT_TITLES = {"quiz": "Quiz", "exercise": "Exercise", "session_plan": "90-Minute Session Plan"}
@@ -42,6 +75,14 @@ GOLD = "#D99A32"
 MUTED = "#66758F"
 WHITE = "#FFFFFF"
 EXPORT_VERSION = 3
+
+
+def _ensure_export_dependencies() -> None:
+    if _EXPORT_IMPORT_ERROR is not None:
+        raise ModuleNotFoundError(
+            "Export features require the project dependencies from requirements.txt. "
+            "Install them with: python -m pip install -r requirements.txt"
+        ) from _EXPORT_IMPORT_ERROR
 
 
 def _all_artifacts(package: dict):
@@ -592,6 +633,7 @@ def export_pptx(package: dict) -> bytes:
 
 def build_artifact_exports(topic: str, level: str, kind: str, content: str) -> dict[str, bytes]:
     """Build PDF, PowerPoint, and Word files for one individual artifact."""
+    _ensure_export_dependencies()
     artifact = [(level, kind, content)]
     return {
         "pdf": _export_pdf(topic, artifact),
@@ -602,6 +644,7 @@ def build_artifact_exports(topic: str, level: str, kind: str, content: str) -> d
 
 def build_exports(package: dict) -> dict:
     """Build full-package exports and individual exports for every artifact."""
+    _ensure_export_dependencies()
     return {
         "version": EXPORT_VERSION,
         "pdf": export_pdf(package),
